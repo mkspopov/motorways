@@ -2,22 +2,27 @@
 #include <SFML/Window.hpp>
 
 #include <array>
-#include <iostream>
 #include <filesystem>
 #include <fstream>
-#include <unordered_map>
-#include <unordered_set>
-#include <random>
+#include <functional>
+#include <iostream>
 #include <map>
-#include <set>
-#include <thread>
 #include <mutex>
 #include <queue>
-#include <functional>
+#include <random>
+#include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 #define range(c) c.begin(), c.end()
 
 using Clock = std::chrono::high_resolution_clock;
+
+struct V2iComp {
+    bool operator()(sf::Vector2i lhs, sf::Vector2i rhs) const {
+        return std::tie(lhs.x, lhs.y) < std::tie(rhs.x, rhs.y);
+    }
+};
 
 static constexpr int SIDE_LENGTH = 100;
 
@@ -38,12 +43,14 @@ static constexpr std::array<std::pair<int, int>, 4> SIDE_NEIGHBORS{{
 
 using Id = std::size_t;
 
-struct Input {
-    // Grid indices
-    sf::Vector2i coordinates;
+// Different types for coordinates for compile-time error checking.
+using GridXy = sf::Vector2i;
+using WindXy = sf::Vector2f;
 
-    bool              isLeft;
-    bool              isSet = false;
+struct Input {
+    WindXy coordinates;
+    bool   isLeft;
+    bool   isSet = false;
 };
 
 struct Entity;
@@ -53,28 +60,28 @@ class Game {
 public:
     Game(sf::RenderWindow& window);
 
-    void CreateRoad(sf::Vector2i coordinates);
-    void CreateSource(sf::Vector2i gridCoordinates);
-    void CreateTarget(sf::Vector2i gridCoordinates);
+    void CreateRoad(WindXy coordinates);
+    void CreateSource(GridXy coordinates);
+    void CreateTarget(GridXy coordinates);
 
-    void RemoveRoad(sf::Vector2i coordinates);
+    void RemoveRoad(GridXy coordinates);
 
-    std::vector<sf::Vector2i> FindPath(Id source, Id target) const;
+    std::vector<GridXy> FindPath(Id source, Id target) const;
 
-    const std::vector<Id>& Get(sf::Vector2i gridCoordinates) const;
+    const std::vector<Id>& Get(GridXy coordinates) const;
 
     std::shared_ptr<Entity> Get(Id id) const;
 
     std::vector<Id> GetFilledTargets() const;
 
-    std::vector<sf::Vector2i> GetFreeCells() const;
+    std::vector<GridXy> GetFreeCells() const;
 
-    bool Has(sf::Vector2i gridCoordinates) const;
+    bool Has(GridXy coordinates) const;
 
-    bool IsOccupied(sf::Vector2i gridCoordinates) const;
+    bool IsOccupied(GridXy coordinates) const;
     bool IsOccupied(int x, int y) const;
 
-    bool IsRoad(sf::Vector2i coordinates) const;
+    bool IsRoad(GridXy coordinates) const;
 
     void ProcessInput();
 
@@ -82,10 +89,10 @@ public:
 
     void Render(double part);
 
-    sf::Vector2i FromGrid(sf::Vector2i coordinates) const;
-    sf::Vector2i FromGrid(int x, int y) const;
-    sf::Vector2i ToGrid(sf::Vector2i coordinates) const;
-    sf::Vector2i ToGrid(int x, int y) const;
+    WindXy FromGrid(GridXy coordinates) const;
+    WindXy FromGrid(int x, int y) const;
+    GridXy ToGrid(WindXy coordinates) const;
+    GridXy ToGrid(int x, int y) const;
 
     void Update();
 
@@ -94,7 +101,7 @@ public:
     uint32_t GetWidth() const;
 
     template <class T, class ...Args>
-    std::shared_ptr<T> AddEntity(sf::Vector2i gridCoordinates, Args&& ...args);
+    std::shared_ptr<T> AddEntity(GridXy coordinates, Args&& ...args);
 
     void RegisterToRender(Visual visual);
 
@@ -143,13 +150,13 @@ private:
 };
 
 struct Entity {
-    Entity(Id id, sf::Vector2i position) : id(id), gridPosition(position) {}
+    Entity(Id id, GridXy position) : id(id), gridPosition(position) {}
 
     virtual ~Entity() = default;
 
     virtual void Update(Game& game) = 0;
 
-    sf::Vector2i gridPosition;
+    GridXy gridPosition;
     Id                id;
     bool removed = false;
 };
@@ -171,7 +178,7 @@ struct Visual {
 };
 
 struct VisualEntity : public Entity, public Visual {
-    VisualEntity(Id id, sf::Vector2i position, std::unique_ptr<sf::Shape> shape)
+    VisualEntity(Id id, GridXy position, std::unique_ptr<sf::Shape> shape)
         : Entity(id, position)
         , Visual(std::move(shape))
     {}
@@ -187,7 +194,7 @@ sf::RectangleShape SOURCE_SHAPE{sf::Vector2f{50, 50}};
 sf::RectangleShape TARGET_SHAPE{sf::Vector2f{90, 90}};
 
 struct Car : public VisualEntity {
-    Car(Id id, sf::Vector2i position, Id source)
+    Car(Id id, GridXy position, Id source)
         : VisualEntity(id, position, std::make_unique<sf::CircleShape>(CAR_SHAPE))
         , source(source)
     {}
@@ -210,21 +217,15 @@ struct Car : public VisualEntity {
     static constexpr float MID_SPEED = 6;
     static constexpr float SLOW_SPEED = 2;
     sf::Vector2f speed;
-    std::vector<sf::Vector2i> path;
+    std::vector<GridXy> path;
     std::size_t curInd = 0;
     Id source;
 };
 
-struct V2iComp {
-    bool operator()(sf::Vector2i lhs, sf::Vector2i rhs) const {
-        return std::tie(lhs.x, lhs.y) < std::tie(rhs.x, rhs.y);
-    }
-};
-
 struct Road : public VisualEntity {
-    Road(Id id, sf::Vector2i position) : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(ROAD_SHAPE)) {}
+    Road(Id id, GridXy position) : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(ROAD_SHAPE)) {}
 
-    void AddSegment(Game& game, sf::Vector2i direction) {
+    void AddSegment(Game& game, GridXy direction) {
         if (!segments.contains(direction)) {
             auto segmentShape = std::make_unique<sf::RectangleShape>(
                 static_cast<sf::RectangleShape&>(*shape));
@@ -245,7 +246,7 @@ struct Road : public VisualEntity {
 
     void Connect(Game& game) {
         for (auto [dx, dy] : SIDE_NEIGHBORS) {
-            const sf::Vector2i coords = {gridPosition.x + dx, gridPosition.y + dy};
+            const GridXy coords = {gridPosition.x + dx, gridPosition.y + dy};
             if (game.Has(coords)) {
                 const auto& neighbors = game.Get(coords);
                 for (const auto& neighborId : neighbors) {
@@ -267,11 +268,11 @@ struct Road : public VisualEntity {
     virtual void Update(Game& game) override {
     }
 
-    std::map<sf::Vector2i, Visual, V2iComp> segments;
+    std::map<GridXy, Visual, V2iComp> segments;
 };
 
 struct Source : public VisualEntity {
-    Source(Id id, sf::Vector2i position)
+    Source(Id id, GridXy position)
         : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(SOURCE_SHAPE))
     {
         shape->setFillColor(SCARLET);
@@ -282,7 +283,7 @@ struct Source : public VisualEntity {
 };
 
 struct Target : public VisualEntity {
-    Target(Id id, sf::Vector2i position)
+    Target(Id id, GridXy position)
         : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(TARGET_SHAPE))
     {
         shape->setFillColor(SCARLET);
@@ -414,11 +415,11 @@ void Game::ProcessInput() {
 //            }
         } else if (event.type == sf::Event::MouseButtonPressed) {
             if (event.mouseButton.button == sf::Mouse::Button::Left) {
-                input.coordinates = {event.mouseButton.x, event.mouseButton.y};
+                input.coordinates = WindXy(event.mouseButton.x, event.mouseButton.y);
                 input.isLeft      = true;
                 input.isSet       = true;
             } else if (event.mouseButton.button == sf::Mouse::Button::Right) {
-                input.coordinates = {event.mouseButton.x, event.mouseButton.y};
+                input.coordinates = WindXy(event.mouseButton.x, event.mouseButton.y);
                 input.isLeft      = false;
                 input.isSet       = true;
             }
@@ -435,8 +436,8 @@ void Game::HandleInput(Input input) {
         if (!IsOccupied(input.coordinates.x, input.coordinates.y)) {
             CreateRoad(input.coordinates);
         }
-    } else if (IsRoad(input.coordinates)) {
-        RemoveRoad(input.coordinates);
+    } else if (IsRoad(ToGrid(input.coordinates))) {
+        RemoveRoad(ToGrid(input.coordinates));
     }
 }
 
@@ -486,39 +487,39 @@ uint32_t Game::GetWidth() const {
     return window_.getSize().x;
 }
 
-void Game::CreateRoad(sf::Vector2i coordinates) {
-    if (IsRoad(coordinates)) {
+void Game::CreateRoad(WindXy coordinates) {
+    const auto gridXy = ToGrid(coordinates);
+    if (IsRoad(gridXy)) {
         return;
     }
-    auto [i, j] = ToGrid(coordinates);
-    auto road = AddEntity<Road>({i, j}, coordinates);
+    auto road = AddEntity<Road>(gridXy);
+    const auto windXy = FromGrid(gridXy);
     road->SetPosition(
-        xDiff_ + i * SIDE_LENGTH + (SIDE_LENGTH - ROAD_SHAPE.getSize().x) / 2,
-        yDiff_ + j * SIDE_LENGTH + (SIDE_LENGTH - ROAD_SHAPE.getSize().y) / 2);
+        windXy.x + (SIDE_LENGTH - ROAD_SHAPE.getSize().x) / 2,
+        windXy.y + (SIDE_LENGTH - ROAD_SHAPE.getSize().y) / 2);
     road->Connect(*this);
 }
 
-void Game::CreateSource(sf::Vector2i gridCoordinates) {
-    auto position = FromGrid(gridCoordinates);
-    auto source = AddEntity<Source>({gridCoordinates.x, gridCoordinates.y}, position);
+void Game::CreateSource(GridXy coordinates) {
+    auto position = FromGrid(coordinates);
+    auto source = AddEntity<Source>(coordinates);
     source->SetPosition(
         position.x + (SIDE_LENGTH - SOURCE_SHAPE.getSize().x) / 2,
         position.y + (SIDE_LENGTH - SOURCE_SHAPE.getSize().y) / 2);
     sources_.push_back(source->id);
 }
 
-void Game::CreateTarget(sf::Vector2i gridCoordinates) {
-    auto position = FromGrid(gridCoordinates);
-    auto target = AddEntity<Target>({gridCoordinates.x, gridCoordinates.y}, position);
+void Game::CreateTarget(GridXy coordinates) {
+    auto position = FromGrid(coordinates);
+    auto target = AddEntity<Target>(coordinates);
     target->SetPosition(
         position.x + (SIDE_LENGTH - TARGET_SHAPE.getSize().x) / 2,
         position.y + (SIDE_LENGTH - TARGET_SHAPE.getSize().y) / 2);
     targets_.push_back(target->id);
 }
 
-void Game::RemoveRoad(sf::Vector2i coordinates) {
-    const auto gridCoords = ToGrid(coordinates);
-    for (auto id : Get(gridCoords)) {
+void Game::RemoveRoad(GridXy coordinates) {
+    for (auto id : Get(coordinates)) {
         if (auto ptr = std::dynamic_pointer_cast<Road>(entities_.at(id))) {
             if (!ptr->removed) {
                 ptr->removed = true;
@@ -528,9 +529,8 @@ void Game::RemoveRoad(sf::Vector2i coordinates) {
     }
 }
 
-bool Game::IsRoad(sf::Vector2i coordinates) const {
-    const auto gridCoords = ToGrid(coordinates);
-    for (auto id : Get(gridCoords)) {
+bool Game::IsRoad(GridXy coordinates) const {
+    for (auto id : Get(coordinates)) {
         if (auto ptr = std::dynamic_pointer_cast<Road>(entities_.at(id))) {
             if (!ptr->removed) {
                 return true;
@@ -540,33 +540,33 @@ bool Game::IsRoad(sf::Vector2i coordinates) const {
     return false;
 }
 
-sf::Vector2i Game::FromGrid(sf::Vector2i coordinates) const {
+WindXy Game::FromGrid(GridXy coordinates) const {
     return FromGrid(coordinates.x, coordinates.y);
 }
 
-sf::Vector2i Game::FromGrid(int x, int y) const {
-    return sf::Vector2i(
+WindXy Game::FromGrid(int x, int y) const {
+    return WindXy(
         xDiff_ + x * SIDE_LENGTH,
         yDiff_ + y * SIDE_LENGTH);
 }
 
-sf::Vector2i Game::ToGrid(sf::Vector2i coordinates) const {
+GridXy Game::ToGrid(WindXy coordinates) const {
     return ToGrid(coordinates.x, coordinates.y);
 }
 
-sf::Vector2i Game::ToGrid(int x, int y) const {
-    return sf::Vector2i(
+GridXy Game::ToGrid(int x, int y) const {
+    return GridXy(
         x * grid_.size() / GetWidth(),
         y * grid_.at(0).size() / GetHeight());
 }
 
 template <class T, class... Args>
-std::shared_ptr<T> Game::AddEntity(sf::Vector2i gridCoordinates, Args&& ... args) {
-    auto entity = std::make_shared<T>(id_, std::forward<Args>(args)...);
-    entity->gridPosition = gridCoordinates;
+std::shared_ptr<T> Game::AddEntity(GridXy coordinates, Args&& ... args) {
+    auto entity = std::make_shared<T>(id_, coordinates, std::forward<Args>(args)...);
+    entity->gridPosition = coordinates;
 
     entities_.at(id_) = entity;
-    grid_.at(gridCoordinates.x).at(gridCoordinates.y).push_back(id_);
+    grid_.at(coordinates.x).at(coordinates.y).push_back(id_);
     ++id_;
     return entity;
 }
@@ -575,16 +575,16 @@ void Game::RegisterToRender(Visual visual) {
     toRender_.emplace_back(std::move(visual));
 }
 
-const std::vector<Id>& Game::Get(sf::Vector2i gridCoordinates) const {
-    const auto [x, y] = gridCoordinates;
+const std::vector<Id>& Game::Get(GridXy coordinates) const {
+    const auto [x, y] = coordinates;
     return grid_.at(x).at(y);
 }
 
-std::vector<sf::Vector2i> Game::GetFreeCells() const {
-    std::vector<sf::Vector2i> freeCells;
+std::vector<GridXy> Game::GetFreeCells() const {
+    std::vector<GridXy> freeCells;
     for (int i = 0; i < grid_.size(); ++i) {
         for (int j = 0; j < grid_[0].size(); ++j) {
-            if (!IsOccupied(sf::Vector2i{i, j})) {
+            if (!IsOccupied(GridXy{i, j})) {
                 freeCells.emplace_back(i, j);
             }
         }
@@ -596,8 +596,8 @@ std::shared_ptr<Entity> Game::Get(Id id) const {
     return entities_.at(id);
 }
 
-bool Game::IsOccupied(sf::Vector2i gridCoordinates) const {
-    const auto& entities = Get(gridCoordinates);
+bool Game::IsOccupied(GridXy coordinates) const {
+    const auto& entities = Get(coordinates);
     return std::any_of(range(entities), [&](const auto& id) {
         return !entities_.at(id)->removed;
     });
@@ -607,8 +607,8 @@ bool Game::IsOccupied(int x, int y) const {
     return IsOccupied(ToGrid(x, y));
 }
 
-bool Game::Has(sf::Vector2i gridCoordinates) const {
-    const auto [x, y] = gridCoordinates;
+bool Game::Has(GridXy coordinates) const {
+    const auto [x, y] = coordinates;
     return 0 <= x && x < grid_.size() && 0 <= y && y < grid_[0].size();
 }
 
@@ -623,8 +623,8 @@ std::vector<Id> Game::GetFilledTargets() const {
     return filled;
 }
 
-std::vector<sf::Vector2i> Game::FindPath(Id source, Id target) const {
-    std::vector<sf::Vector2i> path;
+std::vector<GridXy> Game::FindPath(Id source, Id target) const {
+    std::vector<GridXy> path;
 
     using DistId = std::pair<std::size_t, std::size_t>;
     std::priority_queue<DistId, std::vector<DistId>, std::greater<>> queue;
@@ -635,8 +635,8 @@ std::vector<sf::Vector2i> Game::FindPath(Id source, Id target) const {
         auto [curDist, id] = queue.top();
         auto [x, y] = entities_.at(id)->gridPosition;
         for (auto [dx, dy] : SIDE_NEIGHBORS) {
-            sf::Vector2i neighborGridCoordinates{x + dx, y + dy};
-            for (auto roadId : Get(neighborGridCoordinates)) {
+            GridXy neighborCoordinates{x + dx, y + dy};
+            for (auto roadId : Get(neighborCoordinates)) {
                 if (auto ptr = std::dynamic_pointer_cast<Road>(entities_.at(roadId))) {
 
                 }
