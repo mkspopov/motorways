@@ -1,3 +1,6 @@
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "modernize-use-override"
+
 #include <SFML/Graphics.hpp>
 #include <SFML/Window.hpp>
 
@@ -13,6 +16,41 @@
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
+
+////////////////////////////////////////////////////////////
+template <typename T>
+inline sf::Vector2<T> operator +(const sf::Vector2<T>& left, T right)
+{
+    return sf::Vector2<T>(left.x + right, left.y + right);
+}
+
+////////////////////////////////////////////////////////////
+template <typename T>
+inline sf::Vector2<T> operator +(T left, const sf::Vector2<T>& right)
+{
+    return right + left;
+}
+
+////////////////////////////////////////////////////////////
+template <typename T>
+inline sf::Vector2<T> operator -(const sf::Vector2<T>& left, T right)
+{
+    return sf::Vector2<T>(left.x - right, left.y - right);
+}
+
+////////////////////////////////////////////////////////////
+template <typename T>
+inline sf::Vector2<T> operator -(T left, const sf::Vector2<T>& right)
+{
+    return -(right - left);
+}
+
+////////////////////////////////////////////////////////////
+template <typename T>
+inline std::ostream& operator <<(std::ostream& os, const sf::Vector2<T>& right)
+{
+    return os << right.x << ' ' << right.y;
+}
 
 #define range(c) c.begin(), c.end()
 
@@ -34,18 +72,18 @@ static std::mt19937 gen;
 static std::uniform_int_distribution<> dis;
 static auto COLORS = std::vector{sf::Color::Cyan, sf::Color::Red, sf::Color::Blue};
 
-static constexpr std::array<std::pair<int, int>, 4> SIDE_NEIGHBORS{{
-    {-1, 0},
-    {0, 1},
-    {1, 0},
-    {0, -1},
-}};
-
 using Id = std::size_t;
 
 // Different types for coordinates for compile-time error checking.
 using GridXy = sf::Vector2i;
 using WindXy = sf::Vector2f;
+
+static const inline std::array<GridXy, 4> SIDE_NEIGHBORS{{
+    {-1, 0},
+    {0, 1},
+    {1, 0},
+    {0, -1},
+}};
 
 struct Input {
     WindXy coordinates;
@@ -55,6 +93,17 @@ struct Input {
 
 struct Entity;
 struct Visual;
+
+namespace render {
+
+enum Priority {
+    Lowest,
+    Low,
+    High,
+    Size,
+};
+
+}
 
 class Game {
 public:
@@ -79,13 +128,14 @@ public:
     bool IsOccupied(GridXy coordinates) const;
     bool IsOccupied(int x, int y) const;
 
-    bool IsRoad(GridXy coordinates) const;
+    template <class U>
+    bool Is(GridXy coordinates) const;
 
     void ProcessInput();
 
     void HandleInput(Input input);
 
-    void Render(double part);
+    void Render(float part);
 
     WindXy FromGrid(GridXy coordinates) const;
     WindXy FromGrid(int x, int y) const;
@@ -101,7 +151,8 @@ public:
     template <class T, class ...Args>
     std::shared_ptr<T> AddEntity(GridXy coordinates, Args&& ...args);
 
-    void RegisterToRender(Visual visual);
+    template <class ...Args>
+    void RegisterToRender(int priority, Args&&... args);
 
     void AddConnection(Id from, Id to);
 
@@ -123,9 +174,10 @@ private:
     uint32_t cellByHeight_;
     uint32_t yDiff_;
 
+    static const inline std::vector<Id> EMPTY_ARRAY;
     std::vector<std::vector<std::vector<Id>>> grid_;
-    std::vector<std::shared_ptr<Entity>>      entities_;
-    std::vector<Visual> toRender_;
+    std::vector<std::shared_ptr<Entity>> entities_;
+    std::array<std::vector<std::shared_ptr<Visual>>, static_cast<int>(render::Priority::Size)> toRender_;
 
     std::vector<Id> sources_;
     std::vector<Id> targets_;
@@ -173,7 +225,7 @@ struct Visual {
 
     virtual ~Visual() = default;
 
-    virtual void Render(sf::RenderWindow& window, double part) const {
+    virtual void Render(sf::RenderWindow& window, float part) const {
         window.draw(*shape);
     }
 
@@ -187,9 +239,7 @@ struct VisualEntity : public Entity, public Visual {
         , Visual(std::move(shape))
     {}
 
-    void SetPosition(float x, float y) {
-        shape->setPosition({x, y});
-    }
+    render::Priority priority = render::Priority::Lowest;
 };
 
 sf::CircleShape CAR_SHAPE{10};
@@ -197,10 +247,36 @@ sf::RectangleShape ROAD_SHAPE{sf::Vector2f{34, 34}};
 sf::RectangleShape SOURCE_SHAPE{sf::Vector2f{50, 50}};
 sf::RectangleShape TARGET_SHAPE{sf::Vector2f{90, 90}};
 
+WindXy GetCenter(const std::unique_ptr<sf::Shape>& shape) {
+    auto pos = shape->getPosition();
+    if (auto circ = dynamic_cast<const sf::CircleShape*>(shape.get())) {
+        return pos + circ->getRadius();
+    } else if (auto rect = dynamic_cast<const sf::RectangleShape*>(shape.get())) {
+        return pos + rect->getSize() / 2.0f;
+    }
+    throw std::runtime_error("Unknown shape in GetCenter()");
+}
+
+template <class T>
+T Length(sf::Vector2<T> v) {
+    return std::sqrt(v.x * v.x + v.y * v.y);
+}
+
+bool Contains(const std::unique_ptr<sf::Shape>& shape, WindXy point) {
+    if (auto circ = dynamic_cast<const sf::CircleShape*>(shape.get())) {
+        auto center = GetCenter(shape);
+        return Length(point - center) <= circ->getRadius();
+    } else if (auto rect = dynamic_cast<const sf::RectangleShape*>(shape.get())) {
+        return sf::Rect(shape->getPosition(), rect->getSize()).contains(point);
+    }
+    throw std::runtime_error("Unknown shape in GetCenter()");
+}
+
 struct Target : public VisualEntity {
     Target(Id id, GridXy position)
         : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(TARGET_SHAPE))
     {
+        priority = render::Priority::Low;
         shape->setFillColor(SCARLET);
     }
 
@@ -211,7 +287,11 @@ struct Target : public VisualEntity {
 };
 
 struct Road : public VisualEntity {
-    Road(Id id, GridXy position) : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(ROAD_SHAPE)) {}
+    Road(Id id, GridXy position)
+        : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(ROAD_SHAPE))
+    {
+        priority = render::Priority::Low;
+    }
 
     void AddSegment(Game& game, GridXy direction) {
         if (!segments.contains(direction)) {
@@ -225,7 +305,7 @@ struct Road : public VisualEntity {
         }
     }
 
-    virtual void Render(sf::RenderWindow& window, double part) const {
+    virtual void Render(sf::RenderWindow& window, float part) const override {
         Visual::Render(window, part);
         for (const auto& [_, visual] : segments) {
             visual.Render(window, part);
@@ -235,20 +315,18 @@ struct Road : public VisualEntity {
     void Connect(Game& game) {
         for (auto [dx, dy] : SIDE_NEIGHBORS) {
             const GridXy coords = {gridPosition.x + dx, gridPosition.y + dy};
-            if (game.Has(coords)) {
-                const auto& neighbors = game.Get(coords);
-                for (const auto& neighborId : neighbors) {
-                    auto neighbor = game.Get(neighborId);
-                    if (!neighbor->removed) {
-                        if (auto road = std::dynamic_pointer_cast<Road>(neighbor)) {
-                            if (!game.RoadConnections(id).contains(road->id)) {
-                                game.AddConnection(id, road->id);
-                                AddSegment(game, {dx, dy});
-                                road->AddSegment(game, {-dx, -dy});
-                            }
-                        } else if (game.IsOccupied(coords)) {
+            const auto& neighbors = game.Get(coords);
+            for (const auto& neighborId : neighbors) {
+                auto neighbor = game.Get(neighborId);
+                if (!neighbor->removed) {
+                    if (auto road = std::dynamic_pointer_cast<Road>(neighbor)) {
+                        if (!game.RoadConnections(id).contains(road->id)) {
+                            game.AddConnection(id, road->id);
                             AddSegment(game, {dx, dy});
+                            road->AddSegment(game, {-dx, -dy});
                         }
+                    } else if (game.IsOccupied(coords)) {
+                        AddSegment(game, {dx, dy});
                     }
                 }
             }
@@ -265,31 +343,53 @@ struct Car : public VisualEntity {
     Car(Id id, GridXy position, Id source)
         : VisualEntity(id, position, std::make_unique<sf::CircleShape>(CAR_SHAPE))
         , source(source)
-    {}
+    {
+        shape->setFillColor(sf::Color::Black);
+        priority = render::Priority::High;
+    }
 
-    void Go(auto carPath) {
+    void Go(auto carPath, Id targetId) {
         path = std::move(carPath);
+        target = targetId;
+    }
+
+    virtual void Render(sf::RenderWindow& window, float part) const override {
+        auto sh = static_cast<const sf::CircleShape&>(*shape);
+        sh.move(speed * part);
+        window.draw(sh);
     }
 
     virtual void Update(Game& game) override {
-        if (!path.empty()) {
-            if (speed == sf::Vector2f{0, 0}) {
-                auto nextGridXy = path[1];
-                auto diff = nextGridXy - gridPosition;
-                speed = {diff.x * SLOW_SPEED, diff.y * SLOW_SPEED};
-                return;
-            }
-            auto position = shape->getPosition();
-            auto newPosition = position + speed;
-            if (!game.IsIn(newPosition, gridPosition)) {
-                ++curInd;
-                if (curInd == path.size()) {
+        if (curInd < path.size()) {
+            if (entering_) {
+                auto gridXy = path[curInd];
+                if (GetCenter(shape) == game.FromGrid(gridXy) + SIDE_LENGTH / 2.f) {
+                    auto diff = path[curInd + 1] - gridPosition;
+                    speed = {diff.x * FAST_SPEED, diff.y * FAST_SPEED};
+                    entering_ = false;
+                }
+            } else {
+                if (speed == sf::Vector2f{0, 0}) {
+                    auto nextGridXy = path[1];
+                    auto diff = nextGridXy - gridPosition;
+                    speed = {diff.x * FAST_SPEED, diff.y * FAST_SPEED};
                     return;
                 }
-                auto nextGridXy = path[curInd];
-                auto diff = nextGridXy - gridPosition;
-                speed = {diff.x * SLOW_SPEED, diff.y * SLOW_SPEED};
-                gridPosition = game.ToGrid(newPosition);
+                auto position = shape->getPosition();
+                auto newPosition = position + speed;
+                if (!game.IsIn(newPosition, gridPosition)) {
+                    gridPosition = game.ToGrid(newPosition);
+                    ++curInd;
+                    if (curInd + 1 < path.size()) {
+                        entering_ = true;
+                    }
+                }
+                if (curInd + 1 == path.size() &&
+                    Contains(static_cast<const Target&>(*game.Get(target)).shape, shape->getPosition()))
+                {
+                    curInd = path.size();
+                    speed = {0, 0};
+                }
             }
             shape->move(speed);
         }
@@ -302,6 +402,8 @@ struct Car : public VisualEntity {
     std::vector<GridXy> path;
     std::size_t curInd = 0;
     Id source;
+    Id target;
+    bool entering_ = false;
 };
 
 struct Source : public VisualEntity {
@@ -309,12 +411,15 @@ struct Source : public VisualEntity {
         : VisualEntity(id, position, std::make_unique<sf::RectangleShape>(SOURCE_SHAPE))
     {
         shape->setFillColor(SCARLET);
+        priority = render::Priority::Low;
     }
 
     virtual void Update(Game& game) override {
         for (auto& car : cars_) {
             if (!car) {
                 car = game.AddEntity<Car>(gridPosition, id);
+                car->shape->setPosition(
+                    GetCenter(shape) - static_cast<const sf::CircleShape*>(car->shape.get())->getRadius());
             }
         }
         if (!isFree_[0] && !isFree_[1]) {
@@ -334,38 +439,38 @@ struct Source : public VisualEntity {
                 while (!queue.empty()) {
                     auto [curDist, curId] = queue.top();
                     queue.pop();
-                    if (curId == target.id) {
-                        break;
-                    }
                     if (curDist > distances[curId]) {
                         continue;
                     }
                     auto [x, y] = game.Get(curId)->gridPosition;
                     for (auto [dx, dy] : SIDE_NEIGHBORS) {
                         GridXy neighborCoordinates{x + dx, y + dy};
-                        if (game.Has(neighborCoordinates)) {
-                            for (auto entityId : game.Get(neighborCoordinates)) {
-                                if (auto _ = std::dynamic_pointer_cast<Road>(game.Get(entityId))) {
-                                    auto dist = curDist + 1;
-                                    if (distances[entityId] > dist) {
-                                        distances[entityId] = dist;
-                                        queue.emplace(entityId, dist);
-                                        parents[entityId] = curId;
-                                    }
+                        for (auto entityId : game.Get(neighborCoordinates)) {
+                            if (entityId == targetId) {
+                                distances[entityId] = curDist + 1;
+                                parents[entityId] = curId;
+                                break;
+                            }
+                            if (std::dynamic_pointer_cast<Road>(game.Get(entityId))) {
+                                auto dist = curDist + 1;
+                                if (!distances.contains(entityId) || distances[entityId] > dist) {
+                                    distances[entityId] = dist;
+                                    queue.emplace(dist, entityId);
+                                    parents[entityId] = curId;
                                 }
                             }
                         }
                     }
                 }
 
-                std::vector<GridXy> path;
-                auto curId = target.id;
-                while (curId != id) {
-                    path.emplace_back(game.Get(curId)->gridPosition);
-                    curId = parents[curId];
-                }
+                if (distances.contains(targetId)) {
+                    std::vector<GridXy> path;
+                    auto curId = target.id;
+                    while (curId != id) {
+                        path.emplace_back(game.Get(curId)->gridPosition);
+                        curId = parents[curId];
+                    }
 
-                if (!path.empty()) {
                     path.emplace_back(gridPosition);
                     std::reverse(range(path));
 
@@ -377,7 +482,7 @@ struct Source : public VisualEntity {
                     }
                     isFree_[carIndex] = false;
 
-                    cars_[carIndex]->Go(std::move(path));
+                    cars_[carIndex]->Go(std::move(path), targetId);
                 }
             }
         }
@@ -417,7 +522,7 @@ void PlayGame(Config config, sf::RenderWindow& window) {
             lag -= config.usPerUpdate;
         }
 
-        game.Render(static_cast<double>(lag) / config.usPerUpdate);
+        game.Render(static_cast<float>(lag) / config.usPerUpdate);
         window.display();
     }
 }
@@ -454,7 +559,7 @@ Game::Game(sf::RenderWindow& window)
             sf::Vector2f{1, static_cast<float>(cellByHeight_) * SIDE_LENGTH});
         shape->setPosition(x, yDiff_);
         shape->setFillColor(DARK_GREY);
-        toRender_.emplace_back(std::move(shape));
+        RegisterToRender(render::Priority::Low, std::move(shape));
     }
 
     for (std::size_t y = yDiff_; y < GetHeight(); y += SIDE_LENGTH) {
@@ -462,13 +567,21 @@ Game::Game(sf::RenderWindow& window)
             sf::Vector2f{static_cast<float>(cellByWidth_) * SIDE_LENGTH, 1});
         shape->setPosition(xDiff_, y);
         shape->setFillColor(DARK_GREY);
-        toRender_.emplace_back(std::move(shape));
+        RegisterToRender(render::Priority::Low, std::move(shape));
     }
 
     grid_.resize(cellByWidth_, {cellByHeight_, std::vector<Id>()});
 
     repeatingOperations_.emplace(std::chrono::seconds(4), [this]() {
         auto freeCells = GetFreeCells();
+        std::erase_if(freeCells, [this](auto gridXy) {
+            for (auto dNeighbor : SIDE_NEIGHBORS) {
+                if(Is<Target>(gridXy + dNeighbor)) {
+                    return true;
+                }
+            }
+            return false;
+        });
         if (freeCells.empty()) {
             return;
         }
@@ -478,6 +591,14 @@ Game::Game(sf::RenderWindow& window)
 
     repeatingOperations_.emplace(std::chrono::seconds(10), [this]() {
         auto freeCells = GetFreeCells();
+        std::erase_if(freeCells, [this](auto gridXy) {
+            for (auto dNeighbor : SIDE_NEIGHBORS) {
+                if(Is<Source>(gridXy + dNeighbor)) {
+                    return true;
+                }
+            }
+            return false;
+        });
         if (freeCells.empty()) {
             return;
         }
@@ -528,22 +649,21 @@ void Game::HandleInput(Input input) {
         if (!IsOccupied(input.coordinates.x, input.coordinates.y)) {
             CreateRoad(input.coordinates);
         }
-    } else if (IsRoad(ToGrid(input.coordinates))) {
+    } else if (Is<Road>(ToGrid(input.coordinates))) {
         RemoveRoad(ToGrid(input.coordinates));
     }
 }
 
-void Game::Render(double part) {
+void Game::Render(float part) {
     for (const auto& entity : entities_) {
         if (!entity || entity->removed) {
             continue;
         }
-        if (auto ptr = std::dynamic_pointer_cast<Visual>(entity)) {
-            ptr->Render(window_, part);
-        }
     }
-    for (const auto& vis : toRender_) {
-        window_.draw(*vis.shape);
+    for (const auto& visuals : toRender_) {
+        for (const auto& vis : visuals) {
+            vis->Render(window_, part);
+        }
     }
 }
 
@@ -579,12 +699,12 @@ uint32_t Game::GetWidth() const {
 
 void Game::CreateRoad(WindXy coordinates) {
     const auto gridXy = ToGrid(coordinates);
-    if (IsRoad(gridXy)) {
+    if (Is<Road>(gridXy)) {
         return;
     }
     auto road = AddEntity<Road>(gridXy);
     const auto windXy = FromGrid(gridXy);
-    road->SetPosition(
+    road->shape->setPosition(
         windXy.x + (SIDE_LENGTH - ROAD_SHAPE.getSize().x) / 2,
         windXy.y + (SIDE_LENGTH - ROAD_SHAPE.getSize().y) / 2);
     road->Connect(*this);
@@ -593,19 +713,35 @@ void Game::CreateRoad(WindXy coordinates) {
 void Game::CreateSource(GridXy coordinates) {
     auto position = FromGrid(coordinates);
     auto source = AddEntity<Source>(coordinates);
-    source->SetPosition(
+    source->shape->setPosition(
         position.x + (SIDE_LENGTH - SOURCE_SHAPE.getSize().x) / 2,
         position.y + (SIDE_LENGTH - SOURCE_SHAPE.getSize().y) / 2);
     sources_.push_back(source->id);
+
+    for (auto diff : SIDE_NEIGHBORS) {
+        for (auto entityId : Get(coordinates + diff)) {
+            if (auto road = std::dynamic_pointer_cast<Road>(Get(entityId))) {
+                road->AddSegment(*this, -diff);
+            }
+        }
+    }
 }
 
 void Game::CreateTarget(GridXy coordinates) {
     auto position = FromGrid(coordinates);
     auto target = AddEntity<Target>(coordinates);
-    target->SetPosition(
+    target->shape->setPosition(
         position.x + (SIDE_LENGTH - TARGET_SHAPE.getSize().x) / 2,
         position.y + (SIDE_LENGTH - TARGET_SHAPE.getSize().y) / 2);
     targets_.push_back(target->id);
+
+    for (auto diff : SIDE_NEIGHBORS) {
+        for (auto entityId : Get(coordinates + diff)) {
+            if (auto road = std::dynamic_pointer_cast<Road>(Get(entityId))) {
+                road->AddSegment(*this, -diff);
+            }
+        }
+    }
 }
 
 void Game::RemoveRoad(GridXy coordinates) {
@@ -619,9 +755,10 @@ void Game::RemoveRoad(GridXy coordinates) {
     }
 }
 
-bool Game::IsRoad(GridXy coordinates) const {
+template <class U>
+bool Game::Is(GridXy coordinates) const {
     for (auto id : Get(coordinates)) {
-        if (auto ptr = std::dynamic_pointer_cast<Road>(entities_.at(id))) {
+        if (auto ptr = std::dynamic_pointer_cast<U>(entities_.at(id))) {
             if (!ptr->removed) {
                 return true;
             }
@@ -656,18 +793,31 @@ std::shared_ptr<T> Game::AddEntity(GridXy coordinates, Args&& ... args) {
     entity->gridPosition = coordinates;
 
     entities_.at(id_) = entity;
+    if (auto ptr = std::dynamic_pointer_cast<VisualEntity>(entity)) {
+        RegisterToRender(ptr->priority, std::move(ptr));
+    }
     grid_.at(coordinates.x).at(coordinates.y).push_back(id_);
     ++id_;
     return entity;
 }
 
-void Game::RegisterToRender(Visual visual) {
-    toRender_.emplace_back(std::move(visual));
+template <class ...Args>
+void Game::RegisterToRender(int priority, Args&&... args) {
+    if constexpr (std::is_same_v<Args..., std::shared_ptr<Visual>> ||
+        std::is_same_v<Args..., std::shared_ptr<VisualEntity>>)
+    {
+        toRender_.at(priority).emplace_back(std::move(args...));
+    } else {
+        toRender_.at(priority).emplace_back(std::make_shared<Visual>(std::forward<Args>(args)...));
+    }
 }
 
 const std::vector<Id>& Game::Get(GridXy coordinates) const {
     const auto [x, y] = coordinates;
-    return grid_.at(x).at(y);
+    if (0 <= x && x < grid_.size() && 0 <= y && y < grid_[0].size()) {
+        return grid_[x][y];
+    }
+    return EMPTY_ARRAY;
 }
 
 std::vector<GridXy> Game::GetFreeCells() const {
@@ -721,3 +871,5 @@ void Game::AddConnection(Id from, Id to) {
 const std::unordered_set<Id>& Game::RoadConnections(Id from) {
     return roadGraph_[from];
 }
+
+#pragma clang diagnostic pop`
