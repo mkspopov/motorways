@@ -1,4 +1,7 @@
 #pragma clang diagnostic push
+#pragma ide diagnostic ignored "cppcoreguidelines-pro-type-static-cast-downcast"
+#pragma ide diagnostic ignored "cert-msc51-cpp"
+#pragma ide diagnostic ignored "cert-err58-cpp"
 #pragma ide diagnostic ignored "modernize-use-override"
 
 #include <SFML/Graphics.hpp>
@@ -13,6 +16,7 @@
 #include <mutex>
 #include <queue>
 #include <random>
+#include <ranges>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -68,9 +72,10 @@ static const auto PEACH_PUFF = sf::Color(0xFFDAB9FF);
 static const auto DARK_GREY = sf::Color(0x6B6E76FF);
 static const auto SCARLET = sf::Color(0xfc2847ff);
 
-static std::mt19937 gen;
+static constexpr auto SEED = 0;
+static std::mt19937 gen(SEED);
 static std::uniform_int_distribution<> dis;
-static auto COLORS = std::vector{sf::Color::Cyan, sf::Color::Red, sf::Color::Blue};
+static std::vector<sf::Color> COLORS;
 
 using Id = std::size_t;
 
@@ -155,7 +160,7 @@ public:
     void RegisterToRender(int priority, Args&&... args);
 
     void AddConnection(Id from, Id to);
-
+    void RemoveConnection(Id from, Id to);
     const std::unordered_set<Id>& RoadConnections(Id from);
 
     const auto& GetTargets() const {
@@ -214,7 +219,7 @@ struct Entity {
 
     GridXy gridPosition;
     Id                id;
-    bool removed = false;
+    bool alive = true;
 };
 
 struct Visual {
@@ -312,26 +317,7 @@ struct Road : public VisualEntity {
         }
     }
 
-    void Connect(Game& game) {
-        for (auto [dx, dy] : SIDE_NEIGHBORS) {
-            const GridXy coords = {gridPosition.x + dx, gridPosition.y + dy};
-            const auto& neighbors = game.Get(coords);
-            for (const auto& neighborId : neighbors) {
-                auto neighbor = game.Get(neighborId);
-                if (!neighbor->removed) {
-                    if (auto road = std::dynamic_pointer_cast<Road>(neighbor)) {
-                        if (!game.RoadConnections(id).contains(road->id)) {
-                            game.AddConnection(id, road->id);
-                            AddSegment(game, {dx, dy});
-                            road->AddSegment(game, {-dx, -dy});
-                        }
-                    } else if (game.IsOccupied(coords)) {
-                        AddSegment(game, {dx, dy});
-                    }
-                }
-            }
-        }
-    }
+    void Connect(Game& game);
 
     virtual void Update(Game& game) override {
     }
@@ -343,6 +329,7 @@ struct Car : public VisualEntity {
     Car(Id id, GridXy position, Id source)
         : VisualEntity(id, position, std::make_unique<sf::CircleShape>(CAR_SHAPE))
         , source(source)
+        , target(-1)
     {
         shape->setFillColor(sf::Color::Black);
         priority = render::Priority::High;
@@ -442,22 +429,19 @@ struct Source : public VisualEntity {
                     if (curDist > distances[curId]) {
                         continue;
                     }
-                    auto [x, y] = game.Get(curId)->gridPosition;
-                    for (auto [dx, dy] : SIDE_NEIGHBORS) {
-                        GridXy neighborCoordinates{x + dx, y + dy};
-                        for (auto entityId : game.Get(neighborCoordinates)) {
-                            if (entityId == targetId) {
-                                distances[entityId] = curDist + 1;
+                    for (auto entityId : game.RoadConnections(curId)) {
+                        if (entityId == targetId) {
+                            distances[entityId] = curDist + 1;
+                            parents[entityId] = curId;
+                            break;
+                        }
+                        auto road = std::dynamic_pointer_cast<Road>(game.Get(entityId));
+                        if (road && road->alive) {
+                            auto dist = curDist + 1;
+                            if (!distances.contains(entityId) || distances[entityId] > dist) {
+                                distances[entityId] = dist;
+                                queue.emplace(dist, entityId);
                                 parents[entityId] = curId;
-                                break;
-                            }
-                            if (std::dynamic_pointer_cast<Road>(game.Get(entityId))) {
-                                auto dist = curDist + 1;
-                                if (!distances.contains(entityId) || distances[entityId] > dist) {
-                                    distances[entityId] = dist;
-                                    queue.emplace(dist, entityId);
-                                    parents[entityId] = curId;
-                                }
                             }
                         }
                     }
@@ -532,6 +516,8 @@ int main(int argc, char** argv) {
         std::cout << "Config path is none" << std::endl;
         return 1;
     }
+
+    COLORS = {sf::Color::Cyan, sf::Color::Red, sf::Color::Blue};
 
     auto config = LoadConfig(argv[1]);
     sf::ContextSettings settings;
@@ -617,7 +603,7 @@ Game::Game(sf::RenderWindow& window)
 
 void Game::ProcessInput() {
     Input     input;
-    sf::Event event;
+    sf::Event event; // NOLINT(cppcoreguidelines-pro-type-member-init)
     if (window_.pollEvent(event)) {
         if (event.type == sf::Event::EventType::Closed) {
             std::exit(0);
@@ -655,14 +641,12 @@ void Game::HandleInput(Input input) {
 }
 
 void Game::Render(float part) {
-    for (const auto& entity : entities_) {
-        if (!entity || entity->removed) {
-            continue;
-        }
-    }
     for (const auto& visuals : toRender_) {
         for (const auto& vis : visuals) {
-            vis->Render(window_, part);
+            auto ptr = std::dynamic_pointer_cast<VisualEntity>(vis);
+            if (!ptr || ptr->alive) {
+                vis->Render(window_, part);
+            }
         }
     }
 }
@@ -683,7 +667,7 @@ void Game::Update() {
     auto size = entities_.size();
     for (std::size_t i = 0; i < size; ++i) {
         auto& entity = entities_.at(i);
-        if (entity && !entity->removed) {
+        if (entity && entity->alive) {
             entity->Update(*this);
         }
     }
@@ -722,6 +706,7 @@ void Game::CreateSource(GridXy coordinates) {
         for (auto entityId : Get(coordinates + diff)) {
             if (auto road = std::dynamic_pointer_cast<Road>(Get(entityId))) {
                 road->AddSegment(*this, -diff);
+                AddConnection(source->id, road->id);
             }
         }
     }
@@ -739,6 +724,7 @@ void Game::CreateTarget(GridXy coordinates) {
         for (auto entityId : Get(coordinates + diff)) {
             if (auto road = std::dynamic_pointer_cast<Road>(Get(entityId))) {
                 road->AddSegment(*this, -diff);
+                AddConnection(target->id, road->id);
             }
         }
     }
@@ -747,8 +733,12 @@ void Game::CreateTarget(GridXy coordinates) {
 void Game::RemoveRoad(GridXy coordinates) {
     for (auto id : Get(coordinates)) {
         if (auto ptr = std::dynamic_pointer_cast<Road>(entities_.at(id))) {
-            if (!ptr->removed) {
-                ptr->removed = true;
+            if (ptr->alive) {
+                ptr->alive = false;
+                for (auto it = roadGraph_[id].begin(); it != roadGraph_[id].end(); ) {
+                    roadGraph_[*it].erase(id);
+                    it = roadGraph_[id].erase(it);
+                }
                 return;
             }
         }
@@ -757,14 +747,10 @@ void Game::RemoveRoad(GridXy coordinates) {
 
 template <class U>
 bool Game::Is(GridXy coordinates) const {
-    for (auto id : Get(coordinates)) {
-        if (auto ptr = std::dynamic_pointer_cast<U>(entities_.at(id))) {
-            if (!ptr->removed) {
-                return true;
-            }
-        }
-    }
-    return false;
+    return std::ranges::any_of(Get(coordinates), [this](auto id) {
+        auto ptr = std::dynamic_pointer_cast<U>(entities_.at(id));
+        return ptr && ptr->alive;
+    });
 }
 
 WindXy Game::FromGrid(GridXy coordinates) const {
@@ -772,9 +758,9 @@ WindXy Game::FromGrid(GridXy coordinates) const {
 }
 
 WindXy Game::FromGrid(int x, int y) const {
-    return WindXy(
-        xDiff_ + x * SIDE_LENGTH,
-        yDiff_ + y * SIDE_LENGTH);
+    return {
+        static_cast<float>(xDiff_ + x * SIDE_LENGTH),
+        static_cast<float>(yDiff_ + y * SIDE_LENGTH)};
 }
 
 GridXy Game::ToGrid(WindXy coordinates) const {
@@ -782,9 +768,9 @@ GridXy Game::ToGrid(WindXy coordinates) const {
 }
 
 GridXy Game::ToGrid(int x, int y) const {
-    return GridXy(
-        x * grid_.size() / GetWidth(),
-        y * grid_.at(0).size() / GetHeight());
+    return {
+        static_cast<int>(x * grid_.size() / GetWidth()),
+        static_cast<int>(y * grid_.at(0).size() / GetHeight())};
 }
 
 template <class T, class... Args>
@@ -839,7 +825,7 @@ std::shared_ptr<Entity> Game::Get(Id id) const {
 bool Game::IsOccupied(GridXy coordinates) const {
     const auto& entities = Get(coordinates);
     return std::any_of(range(entities), [&](const auto& id) {
-        return !entities_.at(id)->removed;
+        return entities_.at(id)->alive;
     });
 }
 
@@ -868,8 +854,38 @@ void Game::AddConnection(Id from, Id to) {
     roadGraph_[to].insert(from);
 }
 
+void Game::RemoveConnection(Id from, Id to) {
+    roadGraph_[from].erase(to);
+    roadGraph_[to].erase(from);
+}
+
 const std::unordered_set<Id>& Game::RoadConnections(Id from) {
     return roadGraph_[from];
 }
 
-#pragma clang diagnostic pop`
+void Road::Connect(Game& game) {
+    for (auto [dx, dy] : SIDE_NEIGHBORS) {
+        const GridXy coords = {gridPosition.x + dx, gridPosition.y + dy};
+        const auto& neighbors = game.Get(coords);
+        for (const auto& neighborId : neighbors) {
+            auto neighbor = game.Get(neighborId);
+            if (neighbor->alive) {
+                if (auto road = std::dynamic_pointer_cast<Road>(neighbor)) {
+                    if (!game.RoadConnections(id).contains(road->id)) {
+                        game.AddConnection(id, road->id);
+                        AddSegment(game, {dx, dy});
+                        road->AddSegment(game, {-dx, -dy});
+                    }
+                } else if (auto source = std::dynamic_pointer_cast<Source>(neighbor)) {
+                    game.AddConnection(id, source->id);
+                    AddSegment(game, {dx, dy});
+                } else if (auto target = std::dynamic_pointer_cast<Target>(neighbor)) {
+                    game.AddConnection(id, target->id);
+                    AddSegment(game, {dx, dy});
+                }
+            }
+        }
+    }
+}
+
+#pragma clang diagnostic pop
