@@ -352,10 +352,13 @@ struct Car : public VisualEntity {
         priority = render::Priority::High;
     }
 
-    void Go(auto carPath, Id targetId) {
-        path = std::move(carPath);
-        target = targetId;
+    void Go(auto carPath, Id targetId);
+
+    bool IsFree() const {
+        return state_ == nullptr;
     }
+
+    void Move(std::vector<GridXy>& path, std::size_t& pathInd, bool& entering_, Game& game);
 
     virtual void Render(sf::RenderWindow& window, float part) const override {
         auto sh = static_cast<const sf::CircleShape&>(*shape);
@@ -369,13 +372,11 @@ struct Car : public VisualEntity {
     static constexpr float MID_SPEED = 6;
     static constexpr float SLOW_SPEED = 2;
     sf::Vector2f speed;
-    std::vector<GridXy> path;
-    std::size_t curInd = 0;
     Id source;
     Id target;
-    bool entering_ = false;
-    bool returning_ = false;
-    std::size_t waiting_ = 0;
+
+    struct S;
+    S* state_ = nullptr;
 };
 
 struct Source : public VisualEntity {
@@ -394,7 +395,7 @@ struct Source : public VisualEntity {
                     GetCenter(shape) - static_cast<const sf::CircleShape*>(car->shape.get())->getRadius());
             }
         }
-        if (!isFree_[0] && !isFree_[1]) {
+        if (!cars_[0]->IsFree() && !cars_[1]->IsFree()) {
             return;
         }
         for (auto targetId : game.GetTargets()) {
@@ -445,14 +446,13 @@ struct Source : public VisualEntity {
                     ++target.takenPeople;
 
                     std::size_t carIndex = 0;
-                    if (!isFree_[carIndex]) {
+                    if (!cars_[carIndex]->IsFree()) {
                         carIndex = 1;
                     }
-                    isFree_[carIndex] = false;
 
                     cars_[carIndex]->Go(std::move(path), targetId);
 
-                    if (!isFree_[0] && !isFree_[1]) {
+                    if (!cars_[1 - carIndex]->IsFree()) {
                         return;
                     }
                 }
@@ -461,7 +461,6 @@ struct Source : public VisualEntity {
     }
 
     std::array<std::shared_ptr<Car>, 2> cars_;
-    std::array<bool, 2> isFree_ = {true, true};
 };
 
 struct Config {
@@ -879,58 +878,123 @@ void Road::Connect(Game& game) {
     }
 }
 
-void Car::Update(Game& game) {
-    if (curInd < path.size()) {
-        if (entering_) {
-            auto gridXy = path[curInd];
-            if (GetCenter(shape) == game.FromGrid(gridXy) + SIDE_LENGTH / 2.f) {
-                auto diff = path[curInd + 1] - gridPosition;
-                speed = {diff.x * FAST_SPEED, diff.y * FAST_SPEED};
-                entering_ = false;
-            }
-        } else {
-            if (speed == sf::Vector2f{0, 0}) {
-                auto nextGridXy = path[1];
-                auto diff = nextGridXy - gridPosition;
-                speed = {diff.x * FAST_SPEED, diff.y * FAST_SPEED};
-                return;
-            }
-            auto position = shape->getPosition();
-            auto newPosition = position + speed;
-            if (!game.IsIn(newPosition, gridPosition)) {
-                gridPosition = game.ToGrid(newPosition);
-                ++curInd;
-                if (curInd + 1 < path.size()) {
-                    entering_ = true;
-                }
-            }
-            if (curInd + 1 == path.size() &&
-                (Contains(static_cast<const Target&>(*game.Get(target)).shape, shape->getPosition()) ||
-                 Contains(static_cast<const Source&>(*game.Get(source)).shape, shape->getPosition())))
-            {
-                curInd = path.size();
-                speed = {};
-            }
-        }
-        shape->move(speed);
-    } else if (waiting_ > 0) {
-        --waiting_;
-        if (waiting_ == 0) {
-            curInd = 0;
-        }
-    } else if (returning_) {
-        path.clear();
-        entering_ = false;
-        returning_ = false;
-        curInd = 0;
-        speed = {};
-    } else if (!path.empty()) {
-        --std::static_pointer_cast<Target>(game.Get(target))->people;
-        --std::static_pointer_cast<Target>(game.Get(target))->takenPeople;
-        std::ranges::reverse(path);
-        waiting_ = 100;
-        returning_ = true;
+struct Car::S {
+    S(Car& car) : car(car) {
     }
+
+    virtual ~S() = default;
+
+    virtual S* Update(Game& game) = 0;
+
+    Car& car;
+};
+
+struct WaitingOf : public Car::S {
+    WaitingOf(Car& car, S* next) : S(car), next(next) {
+    }
+
+    virtual S* Update(Game& game) override {
+        --waiting;
+        if (waiting > 0) {
+            return this;
+        }
+        waiting = turns;
+        return next;
+    }
+
+    S* next;
+    int turns = 50;
+    int waiting = turns;
+};
+
+struct Backward : public Car::S {
+    Backward(Car& car, std::vector<GridXy> path) : S(car), path(std::move(path)) {
+    }
+
+    virtual S* Update(Game& game) override {
+        if (pathInd < path.size()) {
+            car.Move(path, pathInd, entering_, game);
+            return this;
+        }
+        path.clear();
+        pathInd = 0;
+        car.speed = {};
+        return nullptr;
+    }
+
+    std::vector<GridXy> path;
+    std::size_t pathInd = 0;
+    bool entering_ = false;
+};
+
+void Car::Move(std::vector<GridXy>& path, std::size_t& pathInd, bool& entering_, Game& game) {
+    if (entering_) {
+        auto gridXy = path[pathInd];
+        if (GetCenter(shape) == game.FromGrid(gridXy) + SIDE_LENGTH / 2.f) {
+            auto diff = path[pathInd + 1] - gridPosition;
+            speed = {diff.x * Car::FAST_SPEED, diff.y * Car::FAST_SPEED};
+            entering_ = false;
+        }
+    } else {
+        if (speed == sf::Vector2f{0, 0}) {
+            auto nextGridXy = path[1];
+            auto diff = nextGridXy - gridPosition;
+            speed = {diff.x * Car::FAST_SPEED, diff.y * Car::FAST_SPEED};
+            return;
+        }
+        auto position = shape->getPosition();
+        auto newPosition = position + speed;
+        if (!game.IsIn(newPosition, gridPosition)) {
+            gridPosition = game.ToGrid(newPosition);
+            ++pathInd;
+            if (pathInd + 1 < path.size()) {
+                entering_ = true;
+            }
+        }
+        if (pathInd + 1 == path.size() &&
+            (Contains(static_cast<const Target&>(*game.Get(target)).shape, shape->getPosition()) ||
+             Contains(static_cast<const Source&>(*game.Get(source)).shape, shape->getPosition())))
+        {
+            pathInd = path.size();
+            speed = {};
+        }
+    }
+    shape->move(speed);
+}
+
+struct Forward : public Car::S {
+    Forward(Car& car, std::vector<GridXy> path) : S(car), path(std::move(path)) {
+    }
+
+    virtual S* Update(Game& game) override {
+        if (pathInd < path.size()) {
+            car.Move(path, pathInd, entering_, game);
+            return this;
+        }
+        --std::static_pointer_cast<Target>(game.Get(car.target))->people;
+        --std::static_pointer_cast<Target>(game.Get(car.target))->takenPeople;
+        std::ranges::reverse(path);
+        return new WaitingOf(car, new Backward(car, std::move(path)));
+    }
+
+    std::vector<GridXy> path;
+    std::size_t pathInd = 0;
+    bool entering_ = false;
+};
+
+void Car::Update(Game& game) {
+    if (state_) {
+        auto old = state_;
+        state_ = state_->Update(game);
+        if (old != state_) {
+            delete old;
+        }
+    }
+}
+
+void Car::Go(auto carPath, Id targetId) {
+    target = targetId;
+    state_ = new Forward(*this, std::move(carPath));
 }
 
 #pragma clang diagnostic pop
